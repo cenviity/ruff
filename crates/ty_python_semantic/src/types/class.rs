@@ -2823,8 +2823,11 @@ impl<'db> ClassLiteral<'db> {
                             }),
                         );
 
-                        let t_default =
-                            BoundTypeVarInstance::synthetic(db, "T", TypeVarVariance::Covariant);
+                        let t_default = BoundTypeVarInstance::synthetic(
+                            db,
+                            Name::new_static("T"),
+                            TypeVarVariance::Covariant,
+                        );
 
                         let get_with_default_sig = Signature::new_generic(
                             Some(GenericContext::from_typevar_instances(db, [t_default])),
@@ -2870,8 +2873,11 @@ impl<'db> ClassLiteral<'db> {
                         )
                     }))
                     .chain(std::iter::once({
-                        let t_default =
-                            BoundTypeVarInstance::synthetic(db, "T", TypeVarVariance::Covariant);
+                        let t_default = BoundTypeVarInstance::synthetic(
+                            db,
+                            Name::new_static("T"),
+                            TypeVarVariance::Covariant,
+                        );
 
                         Signature::new_generic(
                             Some(GenericContext::from_typevar_instances(db, [t_default])),
@@ -2928,8 +2934,11 @@ impl<'db> ClassLiteral<'db> {
                         );
 
                         // `.pop()` with a default value
-                        let t_default =
-                            BoundTypeVarInstance::synthetic(db, "T", TypeVarVariance::Covariant);
+                        let t_default = BoundTypeVarInstance::synthetic(
+                            db,
+                            Name::new_static("T"),
+                            TypeVarVariance::Covariant,
+                        );
 
                         let pop_with_default_sig = Signature::new_generic(
                             Some(GenericContext::from_typevar_instances(db, [t_default])),
