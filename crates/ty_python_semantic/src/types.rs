@@ -10478,6 +10478,7 @@ impl<'db> TypeVarBoundOrConstraints<'db> {
                         .zip(prev_elements.iter())
                         .map(|(ty, prev_ty)| ty.cycle_normalized(db, *prev_ty, cycle))
                         .collect::<Box<_>>(),
+                    RecursivelyDefined::No,
                 ))
             }
             // The choice of whether it's an upper bound or constraints is purely syntactic and
