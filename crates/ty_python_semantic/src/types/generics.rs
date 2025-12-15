@@ -1587,7 +1587,6 @@ impl<'db> SpecializationBuilder<'db> {
             upper: Vec<Type<'db>>,
         }
 
-        let constraints = constraints.limit_to_valid_specializations(self.db);
         let mut sorted_paths = Vec::new();
         constraints.for_each_path(self.db, |path| {
             let mut path: Vec<_> = path.positive_constraints().collect();
@@ -1884,8 +1883,15 @@ impl<'db> SpecializationBuilder<'db> {
                     return Ok(());
                 }
 
-                let when =
-                    actual.when_constraint_set_assignable_to(self.db, formal, self.inferable);
+                let when = actual
+                    .when_constraint_set_assignable_to(self.db, formal, self.inferable)
+                    .limit_to_valid_specializations(self.db);
+                if when.is_never_satisfied(self.db) {
+                    return Err(SpecializationError::NoSolution {
+                        parameter: formal,
+                        argument: actual,
+                    });
+                }
                 self.add_type_mappings_from_constraint_set(formal, when, &mut f);
             }
 
@@ -1905,7 +1911,8 @@ impl<'db> SpecializationBuilder<'db> {
                                 self.db,
                                 formal_callable,
                                 self.inferable,
-                            );
+                            )
+                            .limit_to_valid_specializations(self.db);
                         self.add_type_mappings_from_constraint_set(formal, when, &mut f);
                     } else {
                         for actual_signature in &actual_callable.signatures(self.db).overloads {
@@ -1914,7 +1921,8 @@ impl<'db> SpecializationBuilder<'db> {
                                     self.db,
                                     formal_callable,
                                     self.inferable,
-                                );
+                                )
+                                .limit_to_valid_specializations(self.db);
                             self.add_type_mappings_from_constraint_set(formal, when, &mut f);
                         }
                     }
@@ -1931,6 +1939,10 @@ impl<'db> SpecializationBuilder<'db> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SpecializationError<'db> {
+    NoSolution {
+        parameter: Type<'db>,
+        argument: Type<'db>,
+    },
     MismatchedBound {
         bound_typevar: BoundTypeVarInstance<'db>,
         argument: Type<'db>,
@@ -1942,15 +1954,17 @@ pub(crate) enum SpecializationError<'db> {
 }
 
 impl<'db> SpecializationError<'db> {
-    pub(crate) fn bound_typevar(&self) -> BoundTypeVarInstance<'db> {
+    pub(crate) fn bound_typevar(&self) -> Option<BoundTypeVarInstance<'db>> {
         match self {
-            Self::MismatchedBound { bound_typevar, .. } => *bound_typevar,
-            Self::MismatchedConstraint { bound_typevar, .. } => *bound_typevar,
+            Self::NoSolution { .. } => None,
+            Self::MismatchedBound { bound_typevar, .. } => Some(*bound_typevar),
+            Self::MismatchedConstraint { bound_typevar, .. } => Some(*bound_typevar),
         }
     }
 
     pub(crate) fn argument_type(&self) -> Type<'db> {
         match self {
+            Self::NoSolution { argument, .. } => *argument,
             Self::MismatchedBound { argument, .. } => *argument,
             Self::MismatchedConstraint { argument, .. } => *argument,
         }
