@@ -57,8 +57,6 @@ reveal_type(tuple((1, 2)))  # revealed: tuple[Literal[1], Literal[2]]
 
 reveal_type(tuple([1]))  # revealed: tuple[Unknown | int, ...]
 
-# TODO: one error
-# error: [invalid-argument-type]
 # error: [invalid-argument-type]
 reveal_type(tuple[int]([1]))  # revealed: tuple[int]
 
