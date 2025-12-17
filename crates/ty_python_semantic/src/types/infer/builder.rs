@@ -4638,28 +4638,22 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     }
                 };
 
+                // Determine whether `__setattr__` was called but failed type checking.
+                // In this case, we treat `__setattr__` as a fallback: if there's an explicit
+                // attribute defined, we validate against that instead.
+                let setattr_call_failed = matches!(
+                    setattr_dunder_call_result,
+                    Err(CallDunderError::CallError(..))
+                );
+
                 match setattr_dunder_call_result {
                     Ok(result) => check_setattr_return_type(result),
                     Err(CallDunderError::PossiblyUnbound(result)) => {
                         check_setattr_return_type(*result)
                     }
-                    Err(CallDunderError::CallError(..)) => {
-                        if emit_diagnostics {
-                            if let Some(builder) =
-                                self.context.report_lint(&UNRESOLVED_ATTRIBUTE, target)
-                            {
-                                builder.into_diagnostic(format_args!(
-                                    "Cannot assign object of type `{}` to attribute \
-                                     `{attribute}` on type `{}` with \
-                                     custom `__setattr__` method.",
-                                    value_ty.display(db),
-                                    object_ty.display(db)
-                                ));
-                            }
-                        }
-                        false
-                    }
-                    Err(CallDunderError::MethodNotAvailable) => {
+                    // When `__setattr__` fails type checking (CallError) or doesn't exist
+                    // (MethodNotAvailable), check for explicit attributes.
+                    Err(CallDunderError::CallError(..) | CallDunderError::MethodNotAvailable) => {
                         match object_ty.class_member(db, attribute.into()) {
                             meta_attr @ PlaceAndQualifiers { .. } if meta_attr.is_class_var() => {
                                 if emit_diagnostics {
@@ -4794,15 +4788,27 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
                                     ensure_assignable_to(self, value_ty, instance_attr_ty)
                                 } else {
+                                    // No explicit attribute found. If `__setattr__` failed,
+                                    // report that error; otherwise report unresolved attribute.
                                     if emit_diagnostics {
                                         if let Some(builder) =
                                             self.context.report_lint(&UNRESOLVED_ATTRIBUTE, target)
                                         {
-                                            builder.into_diagnostic(format_args!(
-                                                "Unresolved attribute `{}` on type `{}`.",
-                                                attribute,
-                                                object_ty.display(db)
-                                            ));
+                                            if setattr_call_failed {
+                                                builder.into_diagnostic(format_args!(
+                                                    "Cannot assign object of type `{}` to attribute \
+                                                     `{attribute}` on type `{}` with \
+                                                     custom `__setattr__` method.",
+                                                    value_ty.display(db),
+                                                    object_ty.display(db)
+                                                ));
+                                            } else {
+                                                builder.into_diagnostic(format_args!(
+                                                    "Unresolved attribute `{}` on type `{}`.",
+                                                    attribute,
+                                                    object_ty.display(db)
+                                                ));
+                                            }
                                         }
                                     }
 
