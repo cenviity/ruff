@@ -10,15 +10,18 @@ use crate::semantic_index::scope::ScopeId;
 use crate::types::enums::{enum_member_literals, enum_metadata};
 use crate::types::function::KnownFunction;
 use crate::types::infer::infer_same_file_expression_type;
+use crate::types::typed_dict::TypedDictType;
 use crate::types::{
-    CallableType, ClassLiteral, ClassType, IntersectionBuilder, KnownClass, KnownInstanceType,
-    SpecialFormType, SubclassOfInner, SubclassOfType, Truthiness, Type, TypeContext,
-    TypeVarBoundOrConstraints, UnionBuilder, infer_expression_types,
+    CallableType, ClassLiteral, ClassType, IntersectionBuilder, IntersectionType, KnownClass,
+    KnownInstanceType, SpecialFormType, SubclassOfInner, SubclassOfType, Truthiness, Type,
+    TypeContext, TypeVarBoundOrConstraints, UnionBuilder, infer_expression_types,
 };
 
 use ruff_db::parsed::{ParsedModuleRef, parsed_module};
+use ruff_python_ast::name::Name;
 use ruff_python_stdlib::identifiers::is_identifier;
 
+use either::Either::{Left, Right};
 use itertools::Itertools;
 use ruff_python_ast as ast;
 use ruff_python_ast::{BoolOp, ExprBoolOp};
@@ -868,6 +871,61 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             .tuple_windows::<(&ruff_python_ast::Expr, &ruff_python_ast::Expr)>();
         let mut constraints = NarrowingConstraints::default();
 
+        // Narrow tagged unions of `TypedDict`s with `Literal` keys, for example:
+        //
+        //     class Foo(TypedDict):
+        //         tag: Literal["foo"]
+        //     class Bar(TypedDict):
+        //         tag: Literal["bar"]
+        //     def _(union: Foo | Bar):
+        //         if union["tag"] == "foo":
+        //             reveal_type(union)  # Foo
+        //
+        // Importantly, `my_typeddict_union["tag"]` isn't the place we're going to constraint.
+        // Instead, we're going to constrain `my_typeddict_union` itself.
+        if ops.len() == 1
+            && ops[0] == ast::CmpOp::Eq
+            && let ast::Expr::Subscript(subscript) = &**left
+            && let lhs_value_type = inference.expression_type(&*subscript.value)
+            // Checking for `TypedDict`s up front isn't strictly necessary, since the iterator
+            // below will yield nothing if it doesn't find any, but we want to do as little work as
+            // possible in the common case.
+            && is_typeddict_or_union_with_typeddicts(lhs_value_type, self.db)
+            && let Some(subscript_place_expr) = place_expr(&subscript.value)
+            && let Some(key_literal) = inference
+                .expression_type(&*subscript.slice)
+                .as_string_literal()
+        {
+            let field_name = Name::from(key_literal.value(self.db));
+            let rhs_type = inference.expression_type(&comparators[0]);
+            let mut intersection = IntersectionBuilder::new(self.db);
+            // This iterator handles individual `TypedDict`, unions, intersections (the positive
+            // members), and unions of intersections.
+            for typed_dict_type in all_typeddicts_within_type_iter(lhs_value_type, self.db) {
+                if let Some(field) = typed_dict_type.items(self.db).get(&field_name) {
+                    let known_equality_result = match (field.declared_ty, rhs_type) {
+                        (Type::StringLiteral(lhs), Type::StringLiteral(rhs)) => Some(lhs == rhs),
+                        (Type::IntLiteral(lhs), Type::IntLiteral(rhs)) => Some(lhs == rhs),
+                        // It's unlikely that the user will mix int and string literals in the same
+                        // union, but go ahead and handle it.
+                        (Type::StringLiteral(_), Type::IntLiteral(_))
+                        | (Type::IntLiteral(_), Type::StringLiteral(_)) => Some(false),
+                        _ => None,
+                    };
+                    if let Some(equality) = known_equality_result
+                        && equality != is_positive
+                    {
+                        // We could synthesize a `TypedDict` with just this one specific field, but
+                        // using the caller's own named types makes the resulting intersections
+                        // easier to read, in the cases where they don't simplify out.
+                        intersection = intersection.add_negative(Type::TypedDict(typed_dict_type));
+                    }
+                }
+            }
+            let place = self.expect_place(&subscript_place_expr);
+            constraints.insert(place, intersection.build());
+        }
+
         let mut last_rhs_ty: Option<Type> = None;
 
         for (op, (left, right)) in std::iter::zip(&**ops, comparator_tuples) {
@@ -1201,5 +1259,87 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
                 first.clone()
             }
         }
+    }
+}
+
+// Return true if the given type is a `TypedDict`, or if it's a union that includes at least one
+// `TypedDict` (even if other types are present).
+fn is_typeddict_or_union_with_typeddicts<'db>(ty: Type<'db>, db: &'db dyn Db) -> bool {
+    match ty {
+        Type::TypedDict(_) => true,
+        Type::Union(union) => {
+            union
+                .elements(db)
+                .iter()
+                .any(|union_member_ty| match union_member_ty {
+                    Type::TypedDict(_) => true,
+                    Type::Intersection(intersection) => {
+                        intersection
+                            .positive(db)
+                            .iter()
+                            .any(|intersection_member_ty| {
+                                matches!(intersection_member_ty, Type::TypedDict(_))
+                            })
+                    }
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
+/// If this is a `TypedDict`, return an iterator that yields it. Or if this is a union/intersection
+/// that includes any `TypedDict`s, return an iterator that yields them (and ignores any
+/// non-`TypedDict` members). Otherwise, return an empty iterator.
+fn all_typeddicts_within_type_iter<'db>(
+    ty: Type<'db>,
+    db: &'db dyn Db,
+) -> impl Iterator<Item = TypedDictType<'db>> {
+    // It would be much easier to implement this with generators. As it is, if we want to collect
+    // everything without allocating a `Vec` or boxing the iterators, we need to do a lot of
+    // `Some/None/Either::{Left, Right}` wrapping. This lets the compiler deduce a single concrete
+    // `Iterator` type at each step, instead of a mishmash of types depending on what we find in
+    // these loop-matches. The trick that makes this work is that `Either` implements `Iterator` as
+    // long as both the left and right sides do.
+
+    // Unions are guaranteed to be DNF, so we don't need to consider unions within intersections.
+    fn typeddicts_in_intersection<'db>(
+        intersection: IntersectionType<'db>,
+        db: &'db dyn Db,
+    ) -> impl Iterator<Item = TypedDictType<'db>> {
+        // Yield all the *positive* `TypedDicts` in this intersection.
+        intersection.positive(db).iter().filter_map(|ty| match ty {
+            Type::TypedDict(typed_dict_type) => Some(*typed_dict_type),
+            _ => None,
+        })
+    }
+
+    // But we do need to consider intersections within unions.
+    fn typeddicts_in_union<'db>(
+        union: UnionType<'db>,
+        db: &'db dyn Db,
+    ) -> impl Iterator<Item = TypedDictType<'db>> {
+        union
+            .elements(db)
+            .iter()
+            // Yield all the top-level `TypedDict`s in this union, and also descend into any
+            // intersections.
+            .filter_map(|ty| match ty {
+                Type::TypedDict(typed_dict_type) => Some(Left(std::iter::once(*typed_dict_type))),
+                Type::Intersection(intersection) => {
+                    Some(Right(typeddicts_in_intersection(*intersection, db)))
+                }
+                _ => None,
+            })
+            .flatten()
+    }
+
+    match ty {
+        Type::TypedDict(typed_dict_type) => Left(Left(std::iter::once(typed_dict_type))),
+        Type::Union(union) => Left(Right(typeddicts_in_union(union, db))),
+        Type::Intersection(intersection) => {
+            Right(Left(typeddicts_in_intersection(intersection, db)))
+        }
+        _ => Right(Right(std::iter::empty())),
     }
 }

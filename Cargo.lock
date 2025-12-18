@@ -4521,6 +4521,7 @@ dependencies = [
  "compact_str",
  "datatest-stable",
  "drop_bomb",
+ "either",
  "get-size2",
  "glob",
  "hashbrown 0.16.1",
