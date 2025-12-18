@@ -4578,29 +4578,22 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 // However, we would still have to perform the first inference without type context.
                 let value_ty = infer_value_ty(self, TypeContext::default());
 
+                // Infer `__setattr__` once upfront. We use this result for:
+                // 1. Checking if it returns `Never` (indicating an immutable class)
+                // 2. As a fallback when no explicit attribute is found
+                let setattr_dunder_call_result = object_ty.try_call_dunder_with_policy(
+                    db,
+                    "__setattr__",
+                    &mut CallArguments::positional([Type::string_literal(db, attribute), value_ty]),
+                    TypeContext::default(),
+                    MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
+                );
+
                 // Check if `__setattr__` returns `Never` (indicating an immutable class).
                 // If so, block all attribute assignments regardless of explicit attributes.
-                let setattr_returns_never = {
-                    let setattr_result = object_ty.try_call_dunder_with_policy(
-                        db,
-                        "__setattr__",
-                        &mut CallArguments::positional([
-                            Type::string_literal(db, attribute),
-                            value_ty,
-                        ]),
-                        TypeContext::default(),
-                        MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
-                    );
-                    match setattr_result {
-                        Ok(result) => result.return_type(db).is_never(),
-                        Err(CallDunderError::PossiblyUnbound(result)) => {
-                            result.return_type(db).is_never()
-                        }
-                        // If __setattr__ rejects the type or doesn't exist, it doesn't return Never
-                        Err(
-                            CallDunderError::CallError(..) | CallDunderError::MethodNotAvailable,
-                        ) => false,
-                    }
+                let setattr_returns_never = match &setattr_dunder_call_result {
+                    Ok(result) => result.return_type(db).is_never(),
+                    Err(err) => err.return_type(db).is_some_and(|ty| ty.is_never()),
                 };
 
                 if setattr_returns_never {
@@ -4768,44 +4761,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
                             ensure_assignable_to(self, value_ty, instance_attr_ty)
                         } else {
-                            // No explicit attribute found. Try `__setattr__` as a fallback
-                            // for dynamic attribute assignment.
-                            let setattr_dunder_call_result = object_ty.try_call_dunder_with_policy(
-                                db,
-                                "__setattr__",
-                                &mut CallArguments::positional([
-                                    Type::string_literal(db, attribute),
-                                    value_ty,
-                                ]),
-                                TypeContext::default(),
-                                MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
-                            );
-
-                            let check_setattr_return_type = |result: &Bindings<'db>| -> bool {
-                                match result.return_type(db) {
-                                    Type::Never => {
-                                        if emit_diagnostics {
-                                            if let Some(builder) = self
-                                                .context
-                                                .report_lint(&INVALID_ASSIGNMENT, target)
-                                            {
-                                                builder.into_diagnostic(format_args!(
-                                                    "Cannot assign to unresolved attribute `{attribute}` on type `{}`",
-                                                    object_ty.display(db)
-                                                ));
-                                            }
-                                        }
-                                        false
-                                    }
-                                    _ => true,
-                                }
-                            };
-
+                            // No explicit attribute found. Use `__setattr__` (already inferred
+                            // above) as a fallback for dynamic attribute assignment.
                             match setattr_dunder_call_result {
-                                Ok(result) => check_setattr_return_type(&result),
-                                Err(CallDunderError::PossiblyUnbound(result)) => {
-                                    check_setattr_return_type(&result)
-                                }
+                                // If __setattr__ succeeded, allow the assignment.
+                                Ok(_) | Err(CallDunderError::PossiblyUnbound(_)) => true,
                                 Err(CallDunderError::CallError(..)) => {
                                     if emit_diagnostics {
                                         if let Some(builder) =

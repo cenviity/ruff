@@ -2035,6 +2035,31 @@ def use_module(m: MyModule, param: int) -> None:
     m.undefined_param = param
 ```
 
+### `__setattr__` returning `Never` blocks all assignments
+
+When `__setattr__` returns `Never` (indicating an immutable class), all attribute assignments are
+blocked, even if the value type doesn't match `__setattr__`'s parameter type.
+
+```py
+from typing import NoReturn
+
+class Immutable:
+    x: float
+
+    def __setattr__(self, name: str, value: int) -> NoReturn:
+        raise AttributeError("Immutable")
+
+def _(obj: Immutable) -> None:
+    # Even though `"foo"` doesn't match `__setattr__`'s `value: int` parameter,
+    # we still detect that `__setattr__` returns `Never` and block the assignment.
+    # error: [invalid-assignment] "Cannot assign to attribute `x` on type `Immutable` whose `__setattr__` method returns `Never`/`NoReturn`"
+    obj.x = "foo"
+
+    # Same for assignments that would match `__setattr__`'s parameter type.
+    # error: [invalid-assignment] "Cannot assign to attribute `x` on type `Immutable` whose `__setattr__` method returns `Never`/`NoReturn`"
+    obj.x = 42
+```
+
 ## Objects of all types have a `__class__` method
 
 The type of `x.__class__` is the same as `x`'s meta-type. `x.__class__` is always the same value as
