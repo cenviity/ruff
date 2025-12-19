@@ -48,8 +48,8 @@ use crate::{
     Db, FxIndexMap, FxIndexSet, FxOrderSet, Program,
     module_resolver::file_to_module,
     place::{
-        Definedness, LookupError, LookupResult, Place, PlaceAndQualifiers, known_module_symbol,
-        place_from_bindings, place_from_declarations,
+        Definedness, LookupError, LookupResult, Place, PlaceAndQualifiers, Widening,
+        known_module_symbol, place_from_bindings, place_from_declarations,
     },
     semantic_index::{
         attribute_assignments,
@@ -1180,7 +1180,7 @@ impl<'db> ClassType<'db> {
             )
             .place;
 
-        if let Place::Defined(Type::BoundMethod(metaclass_dunder_call_function), _, _) =
+        if let Place::Defined(Type::BoundMethod(metaclass_dunder_call_function), _, _, _) =
             metaclass_dunder_call_function_symbol
         {
             // TODO: this intentionally diverges from step 1 in
@@ -1243,7 +1243,7 @@ impl<'db> ClassType<'db> {
         // If the class defines an `__init__` method, then we synthesize a callable type with the
         // same parameters as the `__init__` method after it is bound, and with the return type of
         // the concrete type of `Self`.
-        let synthesized_dunder_init_callable = if let Place::Defined(ty, _, _) =
+        let synthesized_dunder_init_callable = if let Place::Defined(ty, _, _, _) =
             dunder_init_function_symbol
         {
             let signature = match ty {
@@ -1318,7 +1318,7 @@ impl<'db> ClassType<'db> {
                     )
                     .place;
 
-                if let Place::Defined(Type::FunctionLiteral(mut new_function), _, _) =
+                if let Place::Defined(Type::FunctionLiteral(mut new_function), _, _, _) =
                     new_function_symbol
                 {
                     if let Some(class_generic_context) = class_generic_context {
@@ -2244,7 +2244,7 @@ impl<'db> ClassLiteral<'db> {
 
             (
                 PlaceAndQualifiers {
-                    place: Place::Defined(ty, _, _),
+                    place: Place::Defined(ty, _, _, _),
                     qualifiers,
                 },
                 Some(dynamic_type),
@@ -2463,7 +2463,8 @@ impl<'db> ClassLiteral<'db> {
                 }
 
                 let dunder_set = field_ty.class_member(db, "__set__".into());
-                if let Place::Defined(dunder_set, _, Definedness::AlwaysDefined) = dunder_set.place
+                if let Place::Defined(dunder_set, _, Definedness::AlwaysDefined, _) =
+                    dunder_set.place
                 {
                     // The descriptor handling below is guarded by this not-dynamic check, because
                     // dynamic types like `Any` are valid (data) descriptors: since they have all
@@ -3284,7 +3285,7 @@ impl<'db> ClassLiteral<'db> {
                 }
                 ClassBase::Class(class) => {
                     if let member @ PlaceAndQualifiers {
-                        place: Place::Defined(ty, origin, boundness),
+                        place: Place::Defined(ty, origin, boundness, _),
                         qualifiers,
                     } = class.own_instance_member(db, name).inner
                     {
@@ -3336,8 +3337,13 @@ impl<'db> ClassLiteral<'db> {
                 Definedness::PossiblyUndefined
             };
 
-            Place::Defined(union.build(), TypeOrigin::Inferred, boundness)
-                .with_qualifiers(union_qualifiers)
+            Place::Defined(
+                union.build(),
+                TypeOrigin::Inferred,
+                boundness,
+                Widening::None,
+            )
+            .with_qualifiers(union_qualifiers)
         }
     }
 
@@ -3690,7 +3696,7 @@ impl<'db> ClassLiteral<'db> {
 
             match declared_and_qualifiers {
                 PlaceAndQualifiers {
-                    place: mut declared @ Place::Defined(declared_ty, _, declaredness),
+                    place: mut declared @ Place::Defined(declared_ty, _, declaredness, _),
                     qualifiers,
                 } => {
                     // For the purpose of finding instance attributes, ignore `ClassVar`
@@ -3735,6 +3741,7 @@ impl<'db> ClassLiteral<'db> {
                                         UnionType::from_elements(db, [declared_ty, implicit_ty]),
                                         TypeOrigin::Declared,
                                         declaredness,
+                                        Widening::None,
                                     )
                                     .with_qualifiers(qualifiers),
                                 }
@@ -3775,6 +3782,7 @@ impl<'db> ClassLiteral<'db> {
                                         UnionType::from_elements(db, [declared_ty, implicit_ty]),
                                         TypeOrigin::Declared,
                                         declaredness,
+                                        Widening::None,
                                     )
                                     .with_qualifiers(qualifiers),
                                 }
@@ -5077,15 +5085,16 @@ impl KnownClass {
     ) -> Result<ClassLiteral<'_>, KnownClassLookupError<'_>> {
         let symbol = known_module_symbol(db, self.canonical_module(db), self.name(db)).place;
         match symbol {
-            Place::Defined(Type::ClassLiteral(class_literal), _, Definedness::AlwaysDefined) => {
+            Place::Defined(Type::ClassLiteral(class_literal), _, Definedness::AlwaysDefined, _) => {
                 Ok(class_literal)
             }
             Place::Defined(
                 Type::ClassLiteral(class_literal),
                 _,
                 Definedness::PossiblyUndefined,
+                _,
             ) => Err(KnownClassLookupError::ClassPossiblyUnbound { class_literal }),
-            Place::Defined(found_type, _, _) => {
+            Place::Defined(found_type, _, _, _) => {
                 Err(KnownClassLookupError::SymbolNotAClass { found_type })
             }
             Place::Undefined => Err(KnownClassLookupError::ClassNotFound),
@@ -5964,7 +5973,7 @@ enum SlotsKind {
 
 impl SlotsKind {
     fn from(db: &dyn Db, base: ClassLiteral) -> Self {
-        let Place::Defined(slots_ty, _, bound) = base
+        let Place::Defined(slots_ty, _, bound, _) = base
             .own_class_member(db, base.inherited_generic_context(db), None, "__slots__")
             .inner
             .place
