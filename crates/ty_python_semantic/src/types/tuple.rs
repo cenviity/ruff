@@ -1788,12 +1788,14 @@ impl<'db> TupleSpecBuilder<'db> {
         }
     }
 
-    /// Return a new tuple-spec builder that reflects the intersection of this tuple and another tuple.
+    /// Return a new tuple-spec builder that reflects the intersection of this tuple and another
+    /// tuple, or `None` if the intersection is impossible (e.g., two fixed-length tuples with
+    /// different lengths).
     ///
     /// For example, if `self` is a tuple-spec builder for `tuple[int, str]` and `other` is a
     /// tuple-spec for `tuple[object, object]`, the result will be a tuple-spec builder for
     /// `tuple[int, str]` (since `int & object` simplifies to `int`, and `str & object` to `str`).
-    pub(crate) fn intersect(mut self, db: &'db dyn Db, other: &TupleSpec<'db>) -> Self {
+    pub(crate) fn intersect(mut self, db: &'db dyn Db, other: &TupleSpec<'db>) -> Option<Self> {
         match (&mut self, other) {
             // Both fixed-length with the same length: element-wise intersection.
             (TupleSpecBuilder::Fixed(our_elements), TupleSpec::Fixed(new_elements))
@@ -1802,7 +1804,12 @@ impl<'db> TupleSpecBuilder<'db> {
                 for (existing, new) in our_elements.iter_mut().zip(new_elements.elements()) {
                     *existing = IntersectionType::from_elements(db, [*existing, *new]);
                 }
-                return self;
+                return Some(self);
+            }
+
+            // Fixed-length tuples with different lengths cannot intersect.
+            (TupleSpecBuilder::Fixed(_), TupleSpec::Fixed(_)) => {
+                return None;
             }
 
             (TupleSpecBuilder::Fixed(our_elements), TupleSpec::Variable(var)) => {
@@ -1837,7 +1844,7 @@ impl<'db> TupleSpecBuilder<'db> {
                     for (existing, new) in suffix.iter_mut().zip(var.suffix_elements()) {
                         *existing = IntersectionType::from_elements(db, [*existing, *new]);
                     }
-                    return self;
+                    return Some(self);
                 }
 
                 let self_built = self.clone().build();
@@ -1848,19 +1855,10 @@ impl<'db> TupleSpecBuilder<'db> {
                     return TupleSpecBuilder::from(&resized).intersect(db, other);
                 }
             }
-
-            _ => {}
         }
 
-        // TODO: probably incorrect? `tuple[int, str] & tuple[int, str, bytes]` should resolve to `Never`.
-        // So maybe this function should be fallible (return an `Option`)?
-        let intersected =
-            IntersectionType::from_elements(db, self.all_elements().chain(other.all_elements()));
-        TupleSpecBuilder::Variable {
-            prefix: vec![],
-            variable: intersected,
-            suffix: vec![],
-        }
+        // We've exhausted all ways to intersect these tuples. The intersection is impossible.
+        None
     }
 
     pub(super) fn build(self) -> TupleSpec<'db> {
