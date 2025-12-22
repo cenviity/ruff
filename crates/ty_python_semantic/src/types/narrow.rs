@@ -883,8 +883,7 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
         //
         // Importantly, `my_typeddict_union["tag"]` isn't the place we're going to constraint.
         // Instead, we're going to constrain `my_typeddict_union` itself.
-        if ops.len() == 1
-            && ops[0] == ast::CmpOp::Eq
+        if matches!(&**ops, [ast::CmpOp::Eq])
             && let ast::Expr::Subscript(subscript) = &**left
             && let lhs_value_type = inference.expression_type(&*subscript.value)
             // Checking for `TypedDict`s up front isn't strictly necessary, since the iterator
@@ -892,9 +891,7 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
             // possible in the common case.
             && is_typeddict_or_union_with_typeddicts(lhs_value_type, self.db)
             && let Some(subscript_place_expr) = place_expr(&subscript.value)
-            && let Some(key_literal) = inference
-                .expression_type(&*subscript.slice)
-                .as_string_literal()
+            && let Type::StringLiteral(key_literal) = inference.expression_type(&*subscript.slice)
         {
             let field_name = Name::from(key_literal.value(self.db));
             let rhs_type = inference.expression_type(&comparators[0]);
